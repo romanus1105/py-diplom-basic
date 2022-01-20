@@ -58,9 +58,7 @@ class YaUploader:
         res_to_mkdir = requests.put(url=f'{yadisk_api_url}',params=params,headers=headers)
         if res_to_mkdir.status_code != 201 and res_to_mkdir.status_code != 409:
             print('При создании папки возникла ошибка.')
-            print(f'Статус ответа - {res_to_mkdir.status_code}')
-            reply = res_to_mkdir.json()
-            print(f'Сообщение от сервера Я.Диска - {reply["message"]}')
+            to_print = self._print_error_info(res_to_mkdir)
             return None
         return path_to_mkdir
 
