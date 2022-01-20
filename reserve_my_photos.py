@@ -1,16 +1,14 @@
 import requests
-import os
 import json
 
 from datetime import datetime
 from progress.bar import IncrementalBar
-from pprint import pprint
 
 class VKDownloader:
     def __init__(self, token: str):
         self.token = token
 
-    def get_urls_to_upload(self, vk_id, accounting_file, count_of_photos):
+    def get_urls_to_upload(self, vk_id, count_of_photos = 5):
         vk_api_url = 'https://api.vk.com/method/photos.get'
         params = {
     'access_token':self.token,
@@ -22,46 +20,25 @@ class VKDownloader:
     'photo_sizes':0,
     'count':count_of_photos
         }
-        dict_of_urls = {}
         res = requests.get(vk_api_url, params=params)
-        if res.status_code == 200:
+        if list(res.json().keys())[0] != 'error':
+            info_json = []
+            list_of_names = []
             for item in res.json()['response']['items']:
                 timestamp = int(item['date'])
-                url_to_downld = item['sizes'][-1]['url']
                 likes = item['likes']['count']
-                date = str(datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d_%H-%M-%S'))
-                file_data_to_add = [{'file_name': None , 'size': item['sizes'][-1]['type']}]
-                # Ckeck whether JSON-file exists
-                if os.path.isfile(accounting_file) and len(dict_of_urls) == 0:
-                    os.remove(accounting_file)
-                    file_data_to_add[0]['file_name'] = f'{likes}'
-                    with open(accounting_file, 'w') as f:
-                        json.dump(file_data_to_add, f)
+                file_data_to_add = {'file_name': None , 'size': item['sizes'][-1]['type'], 'url_to_downld': item['sizes'][-1]['url']}
+                if f'likes' not in list_of_names:
+                    file_data_to_add['file_name'] = f'{likes}'
                 else:
-                    if len(dict_of_urls) == 0:
-                        with open(accounting_file, 'w') as f:
-                            dummy_data = []
-                            json.dump(dummy_data, f)
-                    with open(accounting_file) as f:
-                        json_data = json.load(f)
-                        list_of_names_in_json = []
-                        for item in json_data:
-                            list_of_names_in_json.append(item['file_name'])
-                        # Check whether 'file-name' is in JSON before writing
-                        if f'{likes}' not in list_of_names_in_json:
-                            file_data_to_add[0]['file_name'] = f'{likes}'
-                            with open(accounting_file, 'w') as f:
-                                json.dump(file_data_to_add, f)
-                        else:
-                            file_data_to_add[0]['file_name'] = f'{likes}_{date}'
-                            with open(accounting_file, 'w') as f:
-                                json.dump(file_data_to_add, f)
-                # Add pair of NAME-URL to dict
-                dict_of_urls[file_data_to_add[0]['file_name']] = url_to_downld
+                    date = str(datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d_%H-%M-%S'))
+                    file_data_to_add['file_name'] = f'{likes}_{date}'
+                info_json.append(file_data_to_add)
+            return info_json
         else:
             print('При обращении к Вконтакте возникла ошибка')
-            print(f'Статус ответа - {res.status_code}')
-        return dict_of_urls
+            print(f'Код ошибки - {res.json()["error"]["error_code"]}')
+            print(f'Сообщение от сервера: {res.json()["error"]["error_msg"]}')
 
 class YaUploader:
     def __init__(self, token: str):
@@ -73,7 +50,7 @@ class YaUploader:
             'Authorization': f'OAuth {self.token}'
         }
 
-    def mkdir(self, vk_id):
+    def _mkdir(self, vk_id):
         path_to_mkdir = f'saved_photos_of_{vk_id}'
         yadisk_api_url = 'https://cloud-api.yandex.net/v1/disk/resources'
         headers = { 'Content-Type': 'application/json', 'Authorization': f'OAuth {self.token}'}
@@ -87,30 +64,53 @@ class YaUploader:
             return None
         return path_to_mkdir
 
-    def upload(self, vk_id, dict_of_urls, replace=True):
+    def upload(self, vk_id, info_json):
         yadisk_api_url = 'https://cloud-api.yandex.net/v1/disk/resources/upload'
         headers = self.get_headers()
-        remote_path = self.mkdir(vk_id)
+        remote_path = self._mkdir(vk_id)
         # If directory creation ended succesfully
         if remote_path != None:
             params = {
                 'path' : None,
                 'url' : None
             }
-            bar = IncrementalBar('Загрузка на Я.Диск', max = len(dict_of_urls))
-            for url in dict_of_urls.items():
-                params['path'] = f'{remote_path}/{url[0]}'
-                params['url'] = url[1]
+            bar = IncrementalBar('Загрузка на Я.Диск', max = len(info_json))
+            for item in info_json:
+                params['path'] = f'{remote_path}/{item["file_name"]}'
+                params['url'] = item['url_to_downld']
                 res = requests.post(yadisk_api_url, params=params, headers=headers)
                 if res.status_code != 202:
-                    print(f'При загрузке файла "{url[0]}" возникла ошибка.')
-                    print(f'Статус ответа - {res.status_code}')
-                    reply = res.json()
-                    print(f'Сообщение от сервера Я.Диска - {reply["message"]}')
+                    print(f'При загрузке файла "{item["file_name"]}" возникла ошибка.')
+                    to_print = self._print_error_info(res)
                 else:
                     bar.next()
                     pass
             bar.finish()
+            res = self._upload_json_to_remote_disk(info_json, f'{remote_path}/file_info.json')
+
+
+    def _get_upload_link(self, disk_file_path):
+        upload_url = 'https://cloud-api.yandex.net/v1/disk/resources/upload'
+        headers = self.get_headers()
+        params = {'path': disk_file_path, 'overwrite': 'true'}
+        res = requests.get(upload_url, headers=headers, params=params)
+        if res.status_code == 200:
+            return res.json()
+        else:
+            print(f'При получении ссылки для загрузки JSON-файла возникла ошибка.')
+            to_print = self._print_error_info(res)
+
+    def _upload_json_to_remote_disk(self, info_json, disk_file_path):
+        for dict_of_file in info_json:
+            del dict_of_file['url_to_downld']
+        href_attr = self._get_upload_link(disk_file_path=disk_file_path)
+        if href_attr != None:
+            href_attr = href_attr.get('href', '')
+            res = requests.put(href_attr, data=json.dumps(info_json))
+            res.raise_for_status()
+            if res.status_code != 201:
+                print(f'При загрузке JSON-файла возникла ошибка.')
+                to_print = self._print_error_info(res)
     
     def check_user(self):
         yadisk_api_url = 'https://cloud-api.yandex.net/v1/disk'
@@ -120,21 +120,24 @@ class YaUploader:
             return True
         else:
             print('Возникла проблема при обращении к Я.Диску по токену:')
-            print(f'Статус ответа - {res.status_code}')
-            reply = res.json()
-            print(f'Сообщение от сервера Я.Диска - {reply["message"]}')
+            to_print = self._print_error_info(res)
             return False
+
+    def _print_error_info(self, res):
+        print(f'Статус ответа - {res.status_code}')
+        reply = res.json()
+        print(f'Сообщение от сервера Я.Диска - {reply["message"]}')
 
 def main():
     vk_token = ''
+    ya_token = ''
     downloader = VKDownloader(vk_token)
     vk_id = ''
-    accounting_file = f'photos_of_{vk_id}.json'
     count_of_photos = 2
-    list_of_urls = downloader.get_urls_to_upload(vk_id,accounting_file, count_of_photos)
-    ya_token = ''
-    uploader = YaUploader(ya_token)
-    if uploader.check_user() == True:
-        result = uploader.upload(vk_id, list_of_urls)
+    info_json = downloader.get_urls_to_upload(vk_id, count_of_photos)
+    if info_json != None:
+        uploader = YaUploader(ya_token)
+        if uploader.check_user() != False:
+            result = uploader.upload(vk_id, info_json)
 
 main()
